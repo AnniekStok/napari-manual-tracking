@@ -1,8 +1,25 @@
 name: napari-manual-tracking
 display_name: Manual Tracking
-# use 'hidden' to remove plugin from napari hub search results
-visibility: public
-# see https://napari.org/stable/plugins/manifest.html for valid categories
-categories: ["Annotation", "Segmentation", "Acquisition"]
 contributions:
   commands:
+    - id: napari-manual-tracking.detector
+      python_name: napari_manual_tracking._trackpy_detection:TrackpyDetector
+      title: Detect objects with Trackpy
+    - id: napari-manual-tracking.tracker
+      python_name: napari_manual_tracking._trackpy_linking:TrackpyLinker
+      title: Link labels with Trackpy
+    - id: napari-manual-tracking.manual_tracker
+      python_name: napari_manual_tracking._manual_tracker:ManualDivisionTracker
+      title: Manual Division Tracker
+    - id: napari-manual-tracking.measure_tracks
+      python_name: napari_manual_tracking._plot_tracking_results:MeasureLabelTracks
+      title: Measure Label Properties
+  widgets:
+    - command: napari-manual-tracking.detector
+      display_name: Detect objects with Trackpy
+    - command: napari-manual-tracking.tracker
+      display_name: Link labels with Trackpy
+    - command: napari-manual-tracking.manual_tracker
+      display_name: Manual Division Tracker
+    - command: napari-manual-tracking.measure_tracks
+      display_name: Measure Label Properties
