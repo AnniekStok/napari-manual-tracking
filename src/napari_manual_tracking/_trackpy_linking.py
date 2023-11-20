@@ -15,7 +15,7 @@ from skimage.io            import imread
 from qtpy.QtWidgets        import QMessageBox, QDoubleSpinBox, QComboBox, QGroupBox, QLabel, QHBoxLayout, QVBoxLayout, QPushButton, QWidget, QFileDialog, QLineEdit, QSpinBox
 
 class TrackpyLinker(QWidget):
-    """Widget for running linking with trackpy on a directory containing label images
+    """Widget for running linking with trackpy on a directory containing label images.
     
     """
     
