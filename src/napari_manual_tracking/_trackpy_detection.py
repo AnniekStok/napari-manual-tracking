@@ -308,6 +308,8 @@ class TrackpyDetector(QWidget):
         # Create a range slider widget for each of the properties. 
         self.sliders = []
         for prop in filter_properties:
+            if prop['name'] not in df.columns and prop['name'] == 'size':
+                prop['name'] = 'size_x'               
             slider_widget = CustomRangeSliderWidget(df, property=prop['name'], dtype=prop['type'], tip=prop['tip'])
             slider_widget.range_slider.setEdgeLabelMode(0)
             for slider_label in slider_widget.range_slider._handle_labels:
@@ -347,7 +349,7 @@ class TrackpyDetector(QWidget):
             msg.setStandardButtons(QMessageBox.Ok)
             msg.exec_()
         else:
-            if self.intensity_layer is not None:
+            if self.intensity_layer is not None and self.intensity_layer in self.viewer.layers:
                 self.viewer.layers.remove(self.intensity_layer)
             self.intensity_layer, object_df = self._detect_trackpy(files) # Run trackpy to detect objects
             if self.points is not None:
