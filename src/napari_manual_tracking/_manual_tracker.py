@@ -1,27 +1,24 @@
 import os
 import tifffile
-import matplotlib
+import warnings
 import napari
 
 import pandas           as pd
 import numpy            as np
 
-from typing             import List, Tuple
+from typing             import List
+from skimage                                import measure
 from skimage.io         import imread
-from matplotlib.figure  import Figure
-from matplotlib.colors  import to_rgb
+from matplotlib.colors  import to_rgba
+from napari.utils       import DirectLabelColormap
 
 from pathlib            import Path as PathL
-
-from qtpy.QtGui         import QIcon
-from qtpy.QtCore        import Signal
+from qtpy.QtCore        import Signal, Qt
 from qtpy.QtGui         import QColor
 from qtpy.QtWidgets     import QTableWidget, QAbstractItemView, QMessageBox, QTableWidgetItem, QScrollArea, QGroupBox, QLabel, QTabWidget, QHBoxLayout, QVBoxLayout, QPushButton, QWidget, QFileDialog, QLineEdit, QSpinBox
 
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
-
 from .utilities.napari_multiple_view_widget       import CrossWidget, MultipleViewerWidget
+from .utilities._plot_widget                      import PlotWidget
 
 icon_root = PathL(__file__).parent / "utilities/icons"
 
@@ -31,7 +28,6 @@ class TableWidget(QTableWidget):
     """
     
     table_changed = Signal(pd.DataFrame)
-    colors_changed = Signal(tuple, int)
 
     def __init__(self, df:pd.DataFrame):
         super().__init__()
@@ -56,15 +52,6 @@ class TableWidget(QTableWidget):
 
         self.setEditTriggers(QAbstractItemView.NoEditTriggers)
     
-    def _color_row(self, location, label_color) -> None: 
-        """Color a specific row in the table based on the given label color"""
-
-        self.itemChanged.disconnect(self.table_cell_changed)
-        scaled_color = (int(label_color[0] * 255), int(label_color[1] * 255), int(label_color[2] * 255))
-        for j in range(self.columnCount()):
-            self.item(location[0], j).setBackground(QColor(*scaled_color))
-        self.itemChanged.connect(self.table_cell_changed)
-
     def _color_table(self, colors) -> None:
         """Apply the colors of the napari label image to the table"""
 
@@ -76,7 +63,7 @@ class TableWidget(QTableWidget):
                 for j in range(self.columnCount()):
                     self.item(i, j).setBackground(QColor(*scaled_color))
 
-    def _populate_table(self, df:pd.DataFrame, colors: dict):
+    def _populate_table(self, df:pd.DataFrame, cmap: napari.utils.Colormap):
         """Update the table with a pandas dataframe, overwriting the old associated dataframe."""
 
         self.itemChanged.disconnect(self.table_cell_changed)
@@ -87,35 +74,19 @@ class TableWidget(QTableWidget):
         for i in range(n_rows):
             for j in range(n_cols):
                 item = QTableWidgetItem(str(df.iat[i, j]))
+                # Set the ItemIsEditable flag only for the second column
+                if j == 1:
+                    item.setFlags(item.flags() | Qt.ItemIsEditable)
+
                 self.setItem(i, j, item)
-        self._color_table(colors)
-        self.itemChanged.connect(self.table_cell_changed)
-    
-    def _delete_row(self):
-        """Delete a row in the table widget"""
 
-        self.itemChanged.disconnect(self.table_cell_changed)
-        row_to_delete = self.currentRow()
-        if row_to_delete >= 0:
-            item = self.item(row_to_delete, 0)
-            if item.text() != "":
-                label = int(item.text())
-                self.df = self.df.drop(self.df[self.df['label'] == label].index).reset_index(drop=True)        
-                self.table_changed.emit(self.df)
-            self.removeRow(row_to_delete)             
-        self.itemChanged.connect(self.table_cell_changed)
+        label_colors = {}
+        for label in self.df['label'].unique():
+            if label > 0:
+                label_colors[label] = cmap.map(label)
 
-    def _add_row(self):
-        """Add a row to the table widget"""
-
-        self.itemChanged.disconnect(self.table_cell_changed)
-        self.df.loc[len(self.df.index)] = [0, 0]
-        row_position = self.rowCount()
-        self.insertRow(self.rowCount())
-        for j in range(self.columnCount()):
-            item = QTableWidgetItem("0")  # Create a new QTableWidgetItem for each cell
-            self.setItem(row_position, j, item)       
-        self.itemChanged.connect(self.table_cell_changed)
+        self._color_table(label_colors)
+        self.itemChanged.connect(self.table_cell_changed)   
 
     def table_cell_changed(self, item:QTableWidgetItem):
         """Update the dataframe with manually entered values, and send out a signal with the updated dataframe"""
@@ -128,10 +99,7 @@ class TableWidget(QTableWidget):
             self.df.iat[row, col] = new_value
         except ValueError:
             print('Please enter numerical values!')
-            pass       
         self.table_changed.emit(self.df)
-        if col == 0:
-            self.colors_changed.emit((row, col), new_value)
 
 class ManualDivisionTracker(QWidget):
     """QWidget for manually correcting the tracks by updating label values in a 4D Labels layer
@@ -148,7 +116,13 @@ class ManualDivisionTracker(QWidget):
         self.tab_widget = QTabWidget(self)
         self.include_raw_data2 = False
         self.running = False
+        self.label_df = pd.DataFrame({'time_point': pd.Series(dtype = 'int'), 'label': pd.Series(dtype = 'int'), 'parent': pd.Series(dtype = 'int'), 'cell': pd.Series(dtype = 'str')})
+
         settings_layout = QVBoxLayout()
+
+        # colormap options 
+        self.colormap_options = ['All', 'Tracked', 'Lineage', 'Non-connected cells']
+        self.colormap_selection_index = 0
 
         # Create widgets for user input and settings. 
 
@@ -210,7 +184,7 @@ class ManualDivisionTracker(QWidget):
         edit_box_layout = QVBoxLayout()
 
         source_label_layout = QHBoxLayout()
-        source_label_label = QLabel("Label to be converted")
+        source_label_label = QLabel("Label 1")
         self.source_label_spin = QSpinBox()
         self.source_label_spin.setMaximum(100000)
         source_label_layout.addWidget(source_label_label)
@@ -219,7 +193,7 @@ class ManualDivisionTracker(QWidget):
         source_label_widget.setLayout(source_label_layout)
 
         target_label_layout = QHBoxLayout()
-        target_label_label = QLabel("Label to convert to")
+        target_label_label = QLabel("Label 2")
         self.target_label_spin = QSpinBox()
         self.target_label_spin.setMaximum(100000)
         target_label_layout.addWidget(target_label_label)
@@ -227,21 +201,33 @@ class ManualDivisionTracker(QWidget):
         target_label_widget = QWidget()
         target_label_widget.setLayout(target_label_layout)
 
-        convert_layout = QHBoxLayout()
-        self.edit_frame_btn = QPushButton('Edit subsequent frames')
+        convert_layout = QVBoxLayout()
+        swap_layout = QVBoxLayout()
+        self.edit_frame_btn = QPushButton('Convert label 1 to label 2 (subsequent frames)')
         self.edit_frame_btn.clicked.connect(lambda: self._convert_label(all=False))
         self.edit_frame_btn.setEnabled(False)
-        self.edit_all_btn = QPushButton('Edit all frames')
+        self.edit_all_btn = QPushButton('Convert label 1 to label 2 (all)')
         self.edit_all_btn.clicked.connect(lambda: self._convert_label(all=True))
         self.edit_all_btn.setEnabled(False)
+        self.swap_frame_btn = QPushButton('Swap label 1 and 2 (subsequent frames)')
+        self.swap_frame_btn.clicked.connect(lambda: self._swap_label(all=False))
+        self.swap_frame_btn.setEnabled(False)
+        self.swap_all_btn = QPushButton('Swap label 1 and 2 (all)')
+        self.swap_all_btn.clicked.connect(lambda: self._swap_label(all=True))
+        self.swap_all_btn.setEnabled(False)
+
         convert_layout.addWidget(self.edit_frame_btn)
         convert_layout.addWidget(self.edit_all_btn)
-        convert_widget = QWidget()
-        convert_widget.setLayout(convert_layout)
+        swap_layout.addWidget(self.swap_frame_btn)
+        swap_layout.addWidget(self.swap_all_btn)
+
+        convert_swap_layout = QHBoxLayout()
+        convert_swap_layout.addLayout(convert_layout)
+        convert_swap_layout.addLayout(swap_layout)
 
         edit_box_layout.addWidget(source_label_widget)
         edit_box_layout.addWidget(target_label_widget)
-        edit_box_layout.addWidget(convert_widget)
+        edit_box_layout.addLayout(convert_swap_layout)
         edit_box.setLayout(edit_box_layout)
 
         settings_layout.addWidget(edit_box)
@@ -273,22 +259,10 @@ class ManualDivisionTracker(QWidget):
         self.table_widget = TableWidget(self)
         self.table_widget._disable_editing()
         self.table_widget.table_changed.connect(self._update_parent_labels)  
-        self.table_widget.colors_changed.connect(self._update_table_item_color)  
 
         # Add widget to show and edit table.
         table_edit_widget = QWidget()
         table_edit_widget_layout = QVBoxLayout()
-
-        table_edit_button_layout = QHBoxLayout()
-        self.delete_row_btn = QPushButton('Delete row')
-        self.delete_row_btn.clicked.connect(self.table_widget._delete_row)
-        self.delete_row_btn.setEnabled(False)
-        self.add_row_btn = QPushButton('Add row')
-        self.add_row_btn.clicked.connect(self.table_widget._add_row)
-        self.add_row_btn.setEnabled(False)
-        table_edit_button_layout.addWidget(self.delete_row_btn)
-        table_edit_button_layout.addWidget(self.add_row_btn)
-        table_edit_widget_layout.addLayout(table_edit_button_layout)
 
         table_edit_widget_layout.addWidget(self.table_widget)
         table_edit_widget.setLayout(table_edit_widget_layout)
@@ -313,27 +287,6 @@ class ManualDivisionTracker(QWidget):
         self.main_layout = QVBoxLayout()
         self.main_layout.addWidget(self.tab_widget)
         self.setLayout(self.main_layout)
-
-        # Create a dockable plotting canvas at the bottom of the napari window.
-
-        # Add a plot widget.
-        self.plot_widget_tree = FigureCanvas(Figure(figsize=(2, 1.5), dpi=150))
-        self.ax = self.plot_widget_tree.figure.subplots()
-        self.toolbar = NavigationToolbar(self.plot_widget_tree, self)
-        for action_name in self.toolbar._actions: # change the icons to white for better visibility on dark napari background
-            action = self.toolbar._actions[action_name]
-            if len(action_name) > 0:
-                icon_path = os.path.join(icon_root, action_name + ".png")
-                action.setIcon(QIcon(icon_path))
-
-        # Create a placeholder widget to hold the toolbar and graphics widget.
-        graph_container = QWidget()
-        graph_container.setMaximumHeight(500)
-        graph_container.setLayout(QVBoxLayout())
-        graph_container.layout().addWidget(self.toolbar)
-        graph_container.layout().addWidget(self.plot_widget_tree)
-
-        self.viewer.window.add_dock_widget(graph_container,name='Lineage Tree',area='bottom')
 
     def _on_get_raw_data1_dir(self) -> None:
         """Sets the path to the main raw data directory (e.g. nuclei)"""
@@ -400,95 +353,117 @@ class ManualDivisionTracker(QWidget):
     def _update_parent_labels(self, df:pd.DataFrame) -> None:
         """Update the parent_labels object, the table, and the plot"""
 
-        self.parent_labels = df        
-        self._update_plot()
+        self.parent_labels = df 
+        self.label_df['parent'] = self.label_df['label'].map(self.parent_labels.set_index('label')['parent'])
+        self.plot_widget.props = self.label_df       
+        self.plot_widget._update_plot()
    
-    def _determine_label_plot_order(self) -> List[int]:
-        """Determines the y-axis order of the tree plot, starting with labels for which the parent==0 (no parent known) at the top of the tree"""
-        
-        starting_points = self.parent_labels.loc[self.parent_labels['parent'] == 0, 'label']
-        starting_points = [s for s in starting_points if s != 0]
-        order = [l for l in starting_points if l > 1]
-
-        # Find the children of each of the starting points, and work down the tree.
-        while len(starting_points) > 0:
-            children_list = []
-            for l in starting_points:
-                children = list(self.parent_labels.loc[self.parent_labels['parent'] == l, 'label'])
-                for i, c in enumerate(children):
-                    [children_list.append(c)]
-                    order.insert(order.index(l) + i, c)
-            starting_points = children_list
-
-        return order
-
-    def _update_plot(self) -> None:
-        """Update the tree plot with all the annotated labels"""
-
-        y_axis_order = self._determine_label_plot_order()
-        if len(y_axis_order) > 0:
-            plot_sub = self.label_df[self.label_df['label'].isin(y_axis_order)].copy() # keep only the labels that are in the y_axis_order, as these are manually added by the user.
-            plot_sub.loc[:, 'y_axis_order'] = plot_sub.apply(lambda row: y_axis_order.index(row.label), axis=1)
-            plot_sub.loc[:, 'cell'] = plot_sub.apply(lambda row: 'Cell ' + str(row.label).zfill(5), axis = 1)
-            plot_sub.loc[:, 'label_color'] = plot_sub.apply(lambda row: matplotlib.colors.to_rgb(self.label_layer.get_color(row.label)), axis = 1)
-            plot_sub = plot_sub.sort_values(by = 'y_axis_order', axis = 0)
-
-            # Generate a 'tree' plot to show the hierarchy in the labels.
-            self.ax.clear()
-            self.ax.set_yticks(plot_sub['y_axis_order'])
-            self.ax.set_yticklabels(plot_sub['cell'], fontsize = 8)
-
-            for key, data in plot_sub.groupby('cell'):
-                label = list(plot_sub.loc[plot_sub['cell'] == key, 'label'])[0]
-                label_color = matplotlib.colors.to_rgb(self.label_layer.get_color(label))
-                data.plot(x = 'time_point', y = 'y_axis_order', ax = self.ax, label = key, color = label_color, legend = None, linestyle ='-', marker = 'o')
-
-            # Apply the same label colors also to the y axis labels
-            for ytick, color in zip(self.ax.get_yticklabels(), plot_sub['label_color']):
-                ytick.set_color(color)
-            self.ax.set_ylabel('Cell')
-            self.ax.set_xlabel("Time Point")
-            self.plot_widget_tree.draw()
-
-    def _get_label_colors(self) -> dict: 
-        """Create a dictionary with the rgb colors for each label in self.parent_labels"""
-
-        label_colors = {}
-        for label in self.parent_labels['label'].unique():
-            if label > 0:
-                label_colors[label] = to_rgb(self.label_layer.get_color(label))
-        
-        return label_colors
-    
-    def _update_table_item_color(self, location: Tuple, label: int) -> None:
-        """Request updating of the colors in the table widget"""
-
-        color = to_rgb(self.label_layer.get_color(label))       
-        self.table_widget._color_row(location, color)
-
     def _convert_label(self, all:bool) -> None:
         """Change the label value of a particular label to a new value from the current time point onwards (all is False) or for all time points (all is True)."""
 
         source_label = self.source_label_spin.value()
         target_label = self.target_label_spin.value()
         time_start = int(self.viewer.dims.current_step[0])
-        
-        # Update both the labels layer and the dataframe
-        if all:
-            self.label_layer.data[self.label_layer.data == source_label] = target_label
-            self.label_df.loc[self.label_df['label'] == source_label, "label"] = target_label
-        else:  
-            self.label_layer.data[time_start:, :, :, :][self.label_layer.data[time_start:, :, :, :] == source_label] = target_label
-            self.label_df.loc[(self.label_df['time_point'] >= time_start) & (self.label_df['label'] == source_label), "label"] = target_label
 
-        # If the new label did not exist yet in the parent_labels dataframe, add it now.
-        if not target_label in self.parent_labels['label'].values:
-            self.parent_labels.loc[len(self.parent_labels.index)] = [target_label, 0]
-            label_colors = self._get_label_colors()           
-            self.table_widget._populate_table(self.parent_labels, label_colors)
+        if target_label == 0:
+            # the user wants to remove this label entirely
+            if all: 
+                self.labels.data[self.labels.data == source_label] = target_label
+                self.label_df = self.label_df[self.label_df['label'] != source_label]
+            else:
+                self.labels.data[time_start:, :, :, :][self.labels.data[time_start:, :, :, :] == source_label] = target_label    
+                mask = (self.label_df['label'] != source_label) & (self.label_df['time_point'] <= time_start)        
+                self.label_df = self.label_df[mask]
+            
+            # remove source_label from parent_labels
+            self.parent_labels = self.parent_labels[self.parent_labels['label'] != source_label]
+            self.table_widget._populate_table(self.parent_labels, self.cmap)    
+
+        else: 
+            # Update both the labels layer and the dataframe
+            if all:
+                self.labels.data[self.labels.data == source_label] = target_label
+                self.label_df.loc[self.label_df['label'] == source_label, "label"] = target_label
+            else:  
+                self.labels.data[time_start:, :, :, :][self.labels.data[time_start:, :, :, :] == source_label] = target_label
+                self.label_df.loc[(self.label_df['time_point'] >= time_start) & (self.label_df['label'] == source_label), "label"] = target_label
+
+            # If the new label did not exist yet in the parent_labels dataframe, add it now, and remove any that are no longer in the self.label_df.
+            if not target_label in self.parent_labels['label'].values:
+                self.parent_labels.loc[len(self.parent_labels.index)] = [target_label, 0]
+                self.parent_labels = self.parent_labels[self.parent_labels['label'].isin(self.label_df['label'])]
+                self.table_widget._populate_table(self.parent_labels, self.cmap)        
 
         # Call plot update
-        self._update_plot()
+        self.plot_widget.props = self.label_df       
+        self.plot_widget._update_plot()
+    
+        # update the labels
+        self.labels.data = self.labels.data
+
+    def _swap_label(self, all:bool) -> None:
+        """Change the label value of a particular label to a new value from the current time point onwards (all is False) or for all time points (all is True)."""
+
+        source_label = self.source_label_spin.value()
+        target_label = self.target_label_spin.value()
+        time_start = int(self.viewer.dims.current_step[0])
+        
+        # If any of the two labels did not yet exist in self.parent_labels, the swap is invalid
+        if not (source_label in self.parent_labels['label'].values and target_label in self.parent_labels['label'].values): 
+            print('Invalid source or target label!')
+            warnings.warn('Invalid source or target label!')
+            return
+        
+        # Swap source and target label in the array and in the pandas df
+        if all:
+
+            # swap in the array
+            mask = (self.labels.data == source_label)
+            self.labels.data[self.labels.data == target_label] = source_label
+            self.labels.data[mask] = target_label
+
+            # swap in self.label_df
+            mask_source = self.label_df['label'] == source_label
+            mask_target = self.label_df['label'] == target_label
+
+            self.label_df.loc[mask_target, 'label'] = source_label
+            self.label_df.loc[mask_source, 'label'] = target_label
+
+            # Swap 'parent' values
+            source_parent = self.parent_labels.loc[self.parent_labels['label'] == source_label, 'parent'].values[0]
+            target_parent = self.parent_labels.loc[self.parent_labels['label'] == target_label, 'parent'].values[0]
+
+            self.label_df.loc[mask_target, 'parent'] = source_parent
+            self.label_df.loc[mask_source, 'parent'] = target_parent
+          
+        else:          
+            mask = (self.labels.data[time_start:, :, :, :] == source_label)
+            self.labels.data[time_start:, :, :, :][self.labels.data[time_start:, :, :, :] == target_label] = source_label
+            self.labels.data[time_start:, :, :, :][mask] = target_label
+
+            mask_time_source = (self.label_df['time_point'] >= time_start) & (self.label_df['label'] == source_label)
+            mask_time_target = (self.label_df['time_point'] >= time_start) & (self.label_df['label'] == target_label)
+
+            self.label_df.loc[mask_time_target, 'label'] = source_label
+            self.label_df.loc[mask_time_source, 'label'] = target_label
+
+            # Swap 'parent' values
+            source_parent = self.parent_labels.loc[self.parent_labels['label'] == source_label, 'parent'].values[0]
+            target_parent = self.parent_labels.loc[self.parent_labels['label'] == target_label, 'parent'].values[0]
+
+            self.label_df.loc[mask_time_target, 'parent'] = source_parent
+            self.label_df.loc[mask_time_source, 'parent'] = target_parent  
+        
+        self.parent_labels = self.parent_labels[self.parent_labels['label'].isin(self.label_df['label'])]
+        self.table_widget._populate_table(self.parent_labels, self.cmap)   
+
+        # Call plot update
+        print('updating the plot')
+        self.plot_widget.props = self.label_df       
+        self.plot_widget._update_plot()
+
+        # update the labels
+        self.labels.data = self.labels.data
     
     def _load_image_data(self, directory:str, files:List[str]) -> np.ndarray:
         """Load all tiff files in the specified directory as a numpy.ndarray"""
@@ -511,26 +486,42 @@ class ManualDivisionTracker(QWidget):
         msg.exec_()
     
     def _update_labels(self, time_point:int, label:int) -> None: 
-        """Update the current time point for all labels, and include the new one. Update parent_labels and the plot"""
+        """Update the current time point for all labels, and include the new one. Update parent_labels and the plot. Note that the first time the function is called, the data is not yet updated, so the user needs to click twice if a new label is introduced."""
 
         if label != 1: # label 1 is reserved for non-tracked labels
-            labels = np.unique(np.append(np.unique(self.label_layer.data[self.viewer.dims.current_step[0]]), label)) # check which labels are currently present
-            labels = [l for l in labels if l > 1]
-            time_points = [time_point for l in labels]
-            parents = [-1 for _ in labels] # set the parent to -1 as a placeholder only, it will be overwritten with the data from parent_labels upon saving.
-            d = {'time_point': time_points, 'label': labels, 'parent': parents}
-            df = pd.DataFrame(d)
-            self.label_df = self.label_df.loc[self.label_df['time_point'] != time_point] # remove all rows for the current time point from the dataframe...
-            self.label_df = pd.concat([self.label_df, df]) # ...to concatenate it with the updated data points at the current time point.
 
-            # If the label was not yet in the dataframe, add it to the parent_labels dataframe with parent=0 (to be updated by the user)
-            if not int(label) in self.parent_labels['label'].values:
-                self.parent_labels.loc[len(self.parent_labels.index)] = [int(label), 0]
-                label_colors = self._get_label_colors()           
-                self.table_widget._populate_table(self.parent_labels, label_colors)
+            # If the label was in parent_labels with value -1, set it to 0 
+            if self.parent_labels[self.parent_labels['label'] == label].empty:
+                # Add a new row with label = label and parent = 0
+                self.parent_labels = pd.concat([self.parent_labels, pd.DataFrame({'label': [label], 'parent': [0]})], ignore_index=True)        
+                print('add label to parent labels for ', label)
 
-            self._update_plot()
+            elif self.parent_labels.loc[self.parent_labels['label'] == label, 'parent'].values[0] == -1:
+                print('changing the -1 value to 0 for parent for label', label)
+                self.parent_labels.loc[self.parent_labels['label'] == label, 'parent'] = 0
+               
+            # Also update all other time points for this label, replacing the parent label
+            parent_value = self.parent_labels.loc[self.parent_labels['label'] == label, 'parent'].values[0]
+            self.label_df.loc[self.label_df['label'] == label, 'parent'] = parent_value
 
+        # update self.label_df at the current time point
+        area_df = pd.DataFrame(measure.regionprops_table(self.labels.data[time_point], properties = ['label', 'area']))
+        areas = area_df[area_df['label'] > 1]['area']
+        labels = np.unique(area_df[area_df['label'] > 1]['label'])
+        time_points = [time_point for _ in labels]
+        parents = [self.parent_labels.loc[self.parent_labels['label'] == l, 'parent'].values[0] for l in labels]
+        cells = ['Cell ' + str(label).zfill(5) for label in labels]
+        d = {'time_point': time_points, 'label': labels, 'parent': parents, 'cell': cells, 'area': areas}
+        df = pd.DataFrame(d)
+        self.label_df = self.label_df.loc[self.label_df['time_point'] != time_point] # remove all rows for the current time point from the dataframe...
+        self.label_df = pd.concat([self.label_df, df]) # ...to concatenate it with the updated data points at the current time point.
+        self.plot_widget.props = self.label_df       
+        self.plot_widget._update_plot()
+        
+        # also update the parent labels df, removing any labels that no longer exist in the data. 
+        self.parent_labels = self.parent_labels[self.parent_labels['label'].isin(self.label_df['label'])]
+        self.table_widget._populate_table(self.parent_labels, self.cmap)
+    
     def _on_start(self) -> None:
         """Start the tracking procedure by loading all data and adding mouse callback"""
 
@@ -556,7 +547,7 @@ class ManualDivisionTracker(QWidget):
         
         self.label_files = sorted([f for f in os.listdir(self.label_dir) if '.tif' in f])
         if len(self.label_files) > 0:
-            self.label_layer = self.viewer.add_labels(self._load_image_data(self.label_dir, self.label_files))
+            self.labels = self.viewer.add_labels(self._load_image_data(self.label_dir, self.label_files))
         else:
             # Create empty label files in this directory, so that they can be filled in by the user.
             label_data = []
@@ -564,18 +555,20 @@ class ManualDivisionTracker(QWidget):
                 empty_arr = np.zeros_like(self.raw_layer.data[0])
                 tifffile.imwrite(os.path.join(self.label_dir, (os.path.basename(self.label_dir) + "_TP" + str(i).zfill(4) + ".tif")), empty_arr)
                 label_data.append(empty_arr)
-            self.label_layer = self.viewer.add_labels(np.stack(label_data, axis = 0), name = os.path.basename(self.label_dir))
+            self.labels = self.viewer.add_labels(np.stack(label_data, axis = 0), name = os.path.basename(self.label_dir))
             self.label_files = sorted([f for f in os.listdir(self.label_dir) if '.tif' in f])
-       
+        
+        self.cmap = self.labels.colormap # store the original cycliclabelcolormap
+
         # Activate / deactivate the buttons.
         self.stopbtn.setEnabled(True)
         self.startbtn.setEnabled(False)
         self.edit_all_btn.setEnabled(True)
         self.edit_frame_btn.setEnabled(True)
+        self.swap_all_btn.setEnabled(True)
+        self.swap_frame_btn.setEnabled(True)
         self.tab_widget.setCurrentIndex(0)
         self.table_widget._enable_editing()
-        self.delete_row_btn.setEnabled(True)
-        self.add_row_btn.setEnabled(True)
         self.savebtn.setEnabled(True)
         self.running = True
 
@@ -584,31 +577,134 @@ class ManualDivisionTracker(QWidget):
             self.label_df = pd.read_csv(os.path.join(self.label_dir, 'LabelAnnotations.csv'))
             self.label_df['parent'] = self.label_df['parent'].astype(int)
             self.label_df['label'] = self.label_df['label'].astype(int)
-        else:
-            self.label_df = pd.DataFrame({'time_point': pd.Series(dtype = 'int'), 'label': pd.Series(dtype = 'int'), 'parent': pd.Series(dtype = 'int'), 'y_axis_order': pd.Series(dtype = 'int'), 'cell': pd.Series(dtype = 'str')})
+            self.label_df['cell'] = self.label_df['label'].apply(lambda x: f'Cell {str(x).zfill(5)}')
+
+        else: 
+            for i in range(self.labels.data.shape[0]):
+                props = measure.regionprops_table(self.labels.data[i], properties = ['label', 'area'])
+                props['time_point'] = i
+                props['parent'] = -1
+                props = pd.DataFrame(props)
+                props['cell'] = props.apply(lambda row: 'Cell ' + str(row.label).zfill(5), axis = 1)
+                self.label_df = pd.concat([self.label_df, props])
+            
+        if hasattr(self.labels, "properties"):
+            self.labels.properties = self.label_df
+        if hasattr(self.labels, "features"):
+            self.labels.features = self.label_df
 
         # Populate the parent_labels table widget.
         existing_labels = self.label_df[['label', 'parent']].drop_duplicates().sort_values(by = 'label', axis = 0)
-        existing_labels = existing_labels[existing_labels['parent'] != -1]
         label_list = list(existing_labels['label'])
         parent_list = list(existing_labels['parent'])
-        self.parent_labels = pd.DataFrame({'label': label_list, 'parent': parent_list})
-        label_colors = self._get_label_colors()           
-        self.table_widget._populate_table(self.parent_labels, label_colors)
+        self.parent_labels = pd.DataFrame({'label': label_list, 'parent': parent_list})      
+        self.table_widget._populate_table(self.parent_labels, self.cmap)
 
-        # If there are still previously existing labels, update the plot now. 
-        if not self.label_df.empty:
-            self._update_plot()
+        # Add the plot widget
+        self.plot_widget = PlotWidget(self.label_df, self.labels)
+        self.viewer.window.add_dock_widget(self.plot_widget,name='Lineage Tree',area='bottom')
 
         # Add mouse click callback to fill bucket and paint brush events. 
-        viewer = self.viewer
-        @viewer.mouse_drag_callbacks.append
-        def canvas_painted(viewer, event):
-            if event.type == "mouse_press" and (self.label_layer.mode == "fill" or self.label_layer.mode == "paint"):
-                tp = int(viewer.dims.current_step[0])
-                current_label = self.label_layer.selected_label
-                if self.running: 
-                    self._update_labels(tp, current_label)
+        def labels_updated(event): 
+            print('update labels was triggered!')
+            tp = int(self.viewer.dims.current_step[0])
+            current_label = int(self.labels.selected_label)
+            if self.running: 
+                self._update_labels(tp, current_label)
+
+        @self.labels.events.labels_update.connect(labels_updated)
+        
+        # Add custom key binding
+        @self.labels.bind_key('s')
+        def show_selected_label(event):
+            self.labels.colormap = self.cmap
+            self.labels.show_selected_label = not self.labels.show_selected_label
+
+        @self.labels.bind_key('a')
+        def cycle_label_selection(event):
+
+            self.colormap_selection_index = (self.colormap_selection_index + 1) % len(self.colormap_options)
+            self.viewer.text_overlay.text = str(self.colormap_options[self.colormap_selection_index])
+            self.viewer.text_overlay.visible = True
+            self._update_cmap()
+
+            if self.colormap_options[self.colormap_selection_index] == 'Lineage': 
+                self.labels.events.selected_label.connect(self._update_cmap)
+            else: 
+                self.labels.events.selected_label.disconnect(self._update_cmap) 
+
+
+    def _update_cmap(self) -> None: 
+        """Updates the colormap of the labels, using the current selection (all, tracked, lineage, or loose cells)."""
+
+        self.labels.events.selected_label.disconnect(self._update_cmap)
+        self.labels.colormap = self.cmap
+
+        if not self.colormap_options[self.colormap_selection_index] == "All":           
+            if self.colormap_options[self.colormap_selection_index] == "Tracked": 
+                selection = self.parent_labels.loc[self.parent_labels['parent'] != -1, 'label'] # find all the labels that have a parent != -1
+            if self.colormap_options[self.colormap_selection_index] == "Lineage": 
+                selection = self._get_lineage(self.labels.selected_label)
+            if self.colormap_options[self.colormap_selection_index] == "Non-connected cells": 
+                selection = self.parent_labels.loc[self.parent_labels['parent'] == -1, 'label']
+            
+            self.labels.colormap = self._create_custom_direct_cmap(selection)
+
+            if self.colormap_options[self.colormap_selection_index] == "Lineage": 
+                self.labels.events.selected_label.connect(self._update_cmap)      
+
+    def _get_lineage(self, selected_label: int): 
+        """Get the entire lineage the current label belongs to"""
+
+        if selected_label in [0, 1]:
+            return []
+        try: 
+            parent = self.parent_labels.loc[self.parent_labels['label'] == selected_label, 'parent'].iloc[0]
+        except IndexError:
+            print('this label does not exist in parent labels')
+            return []
+
+        if parent == -1:
+            print('this label has not been tracked yet and therefore does not belong to a lineage')
+            return []
+        elif parent == 0:
+            y_axis_order = self._determine_label_plot_order([selected_label])      
+        else: 
+            while parent > 0:
+                new_parent = self.parent_labels.loc[self.parent_labels['label'] == parent, 'parent'].iloc[0]
+                if (new_parent == 0) or (new_parent == -1) :
+                    break
+                else:
+                    parent = new_parent
+            y_axis_order = self._determine_label_plot_order([parent])  
+        
+        return(y_axis_order)
+
+    def _determine_label_plot_order(self, starting_points: List[int]) -> List[int]:
+        """Determines the y-axis order of the tree plot, from the starting points downward"""
+        
+        y_axis_order = [s for s in starting_points]
+
+        # Find the children of each of the starting points, and work down the tree.
+        while len(starting_points) > 0:
+            children_list = []
+            for l in starting_points:
+                children = list(self.parent_labels.loc[self.parent_labels['parent'] == l, 'label'])
+                for i, c in enumerate(children):
+                    [children_list.append(c)]
+                    y_axis_order.insert(y_axis_order.index(l) + i, c)
+            starting_points = children_list
+
+        return y_axis_order
+
+    def _create_custom_direct_cmap(self, selected_labels: List[int]):
+        """Create a custom direct colormap for the selected labels, and set all other other labels to transparent"""
+        
+        color_dict_rgb = {None: (0.0, 0.0, 0.0, 0.0)}
+        for s in selected_labels:
+            color_dict_rgb[s] = to_rgba(self.labels.get_color(s))
+        print(color_dict_rgb)
+        return DirectLabelColormap(color_dict=color_dict_rgb)
 
     def _save(self, stop=False) -> None:
         """Save the current labels layer and label dataframe"""
@@ -618,19 +714,15 @@ class ManualDivisionTracker(QWidget):
             self.startbtn.setEnabled(True)
             self.running = False
             self.table_widget._disable_editing()
-            self.delete_row_btn.setEnabled(False)
-            self.add_row_btn.setEnabled(False)
             self.savebtn.setEnabled(False)
 
         # Save all label image data.
-        for i in range(self.label_layer.data.shape[0]):
-            reconstructed_labels = self.label_layer.data[i, :, :, :]
+        for i in range(self.labels.data.shape[0]):
+            reconstructed_labels = self.labels.data[i, :, :, :]
             tifffile.imwrite(os.path.join(self.label_dir, self.label_files[i]), reconstructed_labels, bigtiff=True)
 
         # Merge the dataframe with the information from parent_labels and save dataframe and plot.
         self.parent_labels['parent'] = self.parent_labels['parent'].astype(int)
-        result = pd.merge(self.label_df[['time_point', 'label']], self.parent_labels, on = 'label', how = 'left')
+        result = pd.merge(self.label_df[['time_point', 'label', 'area', 'cell']], self.parent_labels, on = 'label', how = 'left')
         result['parent'] = result['parent'].fillna(-1)
-        print(result)
         result.to_csv(os.path.join(self.label_dir, 'LabelAnnotations.csv'), index = False)
-        self.plot_widget_tree.figure.savefig(os.path.join(self.label_dir, 'LabelTracks.png'))
