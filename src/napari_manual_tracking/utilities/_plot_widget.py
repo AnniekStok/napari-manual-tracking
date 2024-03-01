@@ -12,6 +12,7 @@ from matplotlib.colors                  import to_rgb
 from matplotlib.backends.backend_qt5agg import FigureCanvas, NavigationToolbar2QT
 from qtpy.QtWidgets                     import QHBoxLayout, QVBoxLayout, QWidget, QComboBox, QLabel, QRadioButton, QButtonGroup, QGroupBox
 from qtpy.QtGui                         import QIcon
+from ._save_plot_figure                 import CustomNavigationToolbar
 
 ICON_ROOT = Path(__file__).parent / "icons"
 
@@ -32,7 +33,7 @@ class PlotWidget(QWidget):
         self.fig = plt.figure(constrained_layout=True)
         self.plot_canvas = FigureCanvas(self.fig)
         self.ax = self.plot_canvas.figure.subplots()
-        self.toolbar = NavigationToolbar2QT(self.plot_canvas)
+        self.toolbar = CustomNavigationToolbar(self.plot_canvas)
 
         # Specify plot customizations.
         self.fig.patch.set_facecolor("#262930")
@@ -69,7 +70,7 @@ class PlotWidget(QWidget):
 
         color_group_layout = QHBoxLayout()
         self.group_combo = QComboBox()
-        self.group_combo.addItems([item for item in self.props.columns if item not in ('index', 'parent')])
+        self.group_combo.addItems([item for item in self.props.columns if item not in ('index', 'parent', 'cell')])
         self.group_combo.setCurrentText('label')
 
         self.group_combo.currentIndexChanged.connect(self._update_plot)
@@ -184,11 +185,13 @@ class PlotWidget(QWidget):
                         parent = new_parent
                 y_axis_order = self._determine_label_plot_order(parent_labels, [parent])      
       
+        
         plotting_data = self.props[self.props['label'].isin(y_axis_order)].copy() # keep only the labels that are in the y_axis_order.
-        plotting_data['y_axis_order'] = plotting_data['label'].apply(lambda label: y_axis_order.index(label))
-        plotting_data.loc[:, 'cell'] = plotting_data.apply(lambda row: 'Cell ' + str(int(row.label)).zfill(5), axis = 1)
-        plotting_data.loc[:, 'label_color'] = plotting_data.apply(lambda row: to_rgb(self.cmap.map(row.label)), axis = 1)
-        plotting_data = plotting_data.sort_values(by = 'y_axis_order', axis = 0)
+        if not plotting_data.empty:
+            plotting_data['y_axis_order'] = plotting_data['label'].apply(lambda label: y_axis_order.index(label))
+            plotting_data.loc[:, 'cell'] = plotting_data.apply(lambda row: 'Cell ' + str(int(row.label)).zfill(5), axis = 1)
+            plotting_data.loc[:, 'label_color'] = plotting_data.apply(lambda row: to_rgb(self.cmap.map(row.label)), axis = 1)
+            plotting_data = plotting_data.sort_values(by = 'y_axis_order', axis = 0)
 
         return plotting_data
 

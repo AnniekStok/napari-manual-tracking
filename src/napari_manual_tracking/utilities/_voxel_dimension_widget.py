@@ -1,16 +1,14 @@
 from qtpy.QtWidgets import QGroupBox, QVBoxLayout, QDoubleSpinBox, QLabel, QWidget
 
-class VoxelDimensionWidget(QWidget):
+class VoxelDimensionWidget(QGroupBox):
     """Voxel dimension widget
     
     Lets the user specify voxel dimensions using double spin boxes
     """
     
-    def __init__(self):  
-        super().__init__()  
+    def __init__(self, title="Voxel Dimensions"):  
+        super().__init__(title)
            
-        main_layout = QVBoxLayout()
-        voxel_dimension_box = QGroupBox('Voxel dimensions')
         voxel_dimension_layout = QVBoxLayout()
 
         self.x_spin = QDoubleSpinBox()
@@ -28,6 +26,4 @@ class VoxelDimensionWidget(QWidget):
         voxel_dimension_layout.addWidget(QLabel('X (µm):'))
         voxel_dimension_layout.addWidget(self.x_spin)
 
-        voxel_dimension_box.setLayout(voxel_dimension_layout)
-        main_layout.addWidget(voxel_dimension_box)
-        self.setLayout(main_layout)
+        self.setLayout(voxel_dimension_layout)        
