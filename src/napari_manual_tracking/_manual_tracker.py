@@ -41,6 +41,7 @@ class TableWidget(QTableWidget):
         self.setHorizontalHeaderLabels(['label', 'parent'])
         self.itemChanged.connect(self.table_cell_changed)
         self.active = False
+        self.setMinimumWidth(250)
 
     def _enable_editing(self) -> None:
         """Enable editing of the table widget"""
@@ -365,6 +366,11 @@ class ManualDivisionTracker(QWidget):
         target_label = self.target_label_spin.value()
         time_start = int(self.viewer.dims.current_step[0])
 
+        # update self.label_df based on self.parent_labels just in case there are any inconsistencies (dirty fix)
+        self.label_df = pd.merge(self.label_df, self.parent_labels[['label', 'parent']], on='label', how='left', suffixes=('', '_new'))
+        self.label_df['parent'] = self.label_df['parent_new']
+        self.label_df.drop('parent_new', axis=1, inplace=True)
+
         if target_label == 0:
             # the user wants to remove this label entirely
             if all: 
@@ -394,6 +400,11 @@ class ManualDivisionTracker(QWidget):
                 self.parent_labels = self.parent_labels[self.parent_labels['label'].isin(self.label_df['label'])]
                 self.table_widget._populate_table(self.parent_labels, self.cmap)        
 
+        # update self.label_df based on self.parent_labels just in case there are any inconsistencies (dirty fix)
+        self.label_df = pd.merge(self.label_df, self.parent_labels[['label', 'parent']], on='label', how='left', suffixes=('', '_new'))
+        self.label_df['parent'] = self.label_df['parent_new']
+        self.label_df.drop('parent_new', axis=1, inplace=True)
+        
         # Call plot update
         self.plot_widget.props = self.label_df       
         self.plot_widget._update_plot()
@@ -413,7 +424,12 @@ class ManualDivisionTracker(QWidget):
             print('Invalid source or target label!')
             warnings.warn('Invalid source or target label!')
             return
-        
+
+        # update self.label_df based on self.parent_labels just in case there are any inconsistencies (dirty fix)
+        self.label_df = pd.merge(self.label_df, self.parent_labels[['label', 'parent']], on='label', how='left', suffixes=('', '_new'))
+        self.label_df['parent'] = self.label_df['parent_new']
+        self.label_df.drop('parent_new', axis=1, inplace=True)
+
         # Swap source and target label in the array and in the pandas df
         if all:
 
@@ -632,7 +648,6 @@ class ManualDivisionTracker(QWidget):
                 self.labels.events.selected_label.connect(self._update_cmap)
             else: 
                 self.labels.events.selected_label.disconnect(self._update_cmap) 
-
 
     def _update_cmap(self) -> None: 
         """Updates the colormap of the labels, using the current selection (all, tracked, lineage, or loose cells)."""
