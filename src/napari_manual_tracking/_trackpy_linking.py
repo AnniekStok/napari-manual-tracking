@@ -236,7 +236,7 @@ class TrackpyLinker(QWidget):
             links = links[['frame', 'particle']] # Only keep frame and particle columns, since label properties may be updated in the ManualDivisionTracker widget.
             links = links.rename(columns = {'frame': 'time_point', 'particle': 'label'})
             links['parent'] = -1 # add a parent value of -1 (needed for ManualDivisionTracker)
-            links.to_csv(os.path.join(self.outputdir, 'LabelAnnotations.csv'), index = False)
+            # links.to_csv(os.path.join(self.outputdir, 'LabelAnnotations.csv'), index = False)
 
     def _run(self) -> None:
         """Run trackpy to link the data in the table"""

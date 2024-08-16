@@ -17,7 +17,6 @@ from qtpy.QtCore        import Signal, Qt
 from qtpy.QtGui         import QColor
 from qtpy.QtWidgets     import QTableWidget, QAbstractItemView, QMessageBox, QTableWidgetItem, QScrollArea, QGroupBox, QLabel, QTabWidget, QHBoxLayout, QVBoxLayout, QPushButton, QWidget, QFileDialog, QLineEdit, QSpinBox
 
-from .utilities.napari_multiple_view_widget       import CrossWidget, MultipleViewerWidget
 from .utilities._plot_widget                      import PlotWidget
 
 icon_root = PathL(__file__).parent / "utilities/icons"
@@ -239,23 +238,12 @@ class ManualDivisionTracker(QWidget):
         self.savebtn.setEnabled(False)
         settings_layout.addWidget(self.savebtn)
         
-        # Add the button to show the cross in multiple viewer widget.
-        cross_box = QGroupBox('Add cross to multiview')
-        cross_box_layout = QHBoxLayout()
-        self.cross = CrossWidget(self.viewer)
-        cross_box_layout.addWidget(self.cross)
-        cross_box.setLayout(cross_box_layout)
-        settings_layout.addWidget(cross_box)
-
-        # Create tab widget that holds the multipleviewer + table in the first tab and the settings in the second tab 
+        # Create tab widget that holds the table in the first tab and the settings in the second tab 
 
         # Create horizontal layout to have multiple viewer widget on the left and table on the right.
         self.multi_view_table_widget = QWidget()
-        self.multi_view_table_layout = QHBoxLayout()
-
-        # Add multiview widget.
-        self.multiview_widget = MultipleViewerWidget(self.viewer)
-     
+        self.multi_view_table_layout = QVBoxLayout()
+    
         # Create an instance of the customized table widget.
         self.table_widget = TableWidget(self)
         self.table_widget._disable_editing()
@@ -269,10 +257,9 @@ class ManualDivisionTracker(QWidget):
         table_edit_widget.setLayout(table_edit_widget_layout)
 
         # Add multiview and combined table widget to the layout, apply to the widget, and set it in the first tab of the tab_widget.
-        self.multi_view_table_layout.addWidget(self.multiview_widget)
         self.multi_view_table_layout.addWidget(table_edit_widget)        
         self.multi_view_table_widget.setLayout(self.multi_view_table_layout)      
-        self.tab_widget.addTab(self.multi_view_table_widget, "Orthogonal Views")
+        self.tab_widget.addTab(self.multi_view_table_widget, "Table")
 
         # Combine all settings widgets and create a tab in the tab_widget.
         settings_widgets = QWidget()
@@ -541,8 +528,6 @@ class ManualDivisionTracker(QWidget):
     def _on_start(self) -> None:
         """Start the tracking procedure by loading all data and adding mouse callback"""
 
-        self.cross.setChecked(False)
-        self.cross.layer = None
         self.viewer.layers.clear()
         
         # Load the image data from the provided directories. 
